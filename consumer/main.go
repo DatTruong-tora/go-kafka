@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"go-kafka/producer/models"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -20,7 +23,7 @@ const (
 	numWorkers    = 3
 )
 
-func runWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
+func runWorker(ctx context.Context, workerID int, deliveryChan chan<- models.Order, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
@@ -45,11 +48,15 @@ func runWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
 			return
 		}
 
-		fmt.Printf("[Worker-%d] Received order (partition=%d, offset=%d): %s\n",
-			workerID, message.Partition, message.Offset, string(message.Value))
-		fmt.Printf("[Worker-%d] --- Processing & Cooking... ---\n", workerID)
+		var order models.Order
+		if err := json.Unmarshal(message.Value, &order); err != nil {
+			log.Printf("[Worker-%d] Error parsing message: %v", workerID, err)
+			return
+		}
+		fmt.Printf("[Worker-%d] 👨‍🍳 Cooking: %s for %s\n", workerID, order.PizzaType, order.CustomerName)
+		time.Sleep(2 * time.Second)
 
-		time.Sleep(3 * time.Second)
+		deliveryChan <- order
 
 		fmt.Printf("[Worker-%d] Done! Order %s is ready for delivery!\n", workerID, string(message.Key))
 		fmt.Printf("[Worker-%d] -------------------------------------------\n", workerID)
@@ -60,21 +67,36 @@ func runWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
 	}
 }
 
+func runDelivery(ctx context.Context, deliveryChan <-chan models.Order, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case order := <-deliveryChan:
+			fmt.Printf("[Shipper] 🛵 Delivering Order %s: %s to %s!\n",
+				order.OrderID, order.PizzaType, order.CustomerName)
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
 	var wg sync.WaitGroup
 
-	fmt.Printf("Kitchen Service starting %d workers in consumer group '%s'...\n", numWorkers, groupID)
+	deliveryChan := make(chan models.Order, 10)
+
+	wg.Add(1)
+	go runDelivery(ctx, deliveryChan, &wg)
 
 	for i := 1; i <= numWorkers; i++ {
 		wg.Add(1)
-		go runWorker(ctx, i, &wg)
+		go runWorker(ctx, i, deliveryChan, &wg)
 	}
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigChan
 	fmt.Printf("\nReceived signal: %v. Shutting down consumer group...\n", sig)
