@@ -17,7 +17,7 @@ func main() {
 	writer := &kafka.Writer{
 		Addr:     kafka.TCP("localhost:9092"),
 		Topic:    "pizza-orders",
-		Balancer: &kafka.LeastBytes{},
+		Balancer: &kafka.RoundRobin{}, // Distribute messages evenly across partitions for consumer group
 	}
 	defer writer.Close()
 
@@ -48,8 +48,8 @@ func main() {
 			return
 		}
 
-		fmt.Fprint(w, "Order placed successfully")
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":   "Order sent to kitchen",
 			"order_id": order.OrderID,
